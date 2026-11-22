@@ -1,0 +1,125 @@
+﻿services:
+  kafka:
+    image: bitnamilegacy/kafka:3.7
+    container_name: pedali-kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_ENABLE_KRAFT: "yes"
+      KAFKA_CFG_NODE_ID: "0"
+      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka_data:/bitnami/kafka
+
+  kafka-init:
+    image: bitnamilegacy/kafka:3.7
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        until kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do sleep 2; done
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic trips --partitions 3 --replication-factor 1
+        kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic trips
+    restart: "no"
+
+  spark-master:
+    image: bitnamilegacy/spark:3.5
+    container_name: pedali-spark-master
+    user: root
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "4040:4040"
+    volumes: &pedali-volumes
+      - ./src:/opt/pedali/src
+      - ./data:/opt/pedali/data
+      - ./producer.py:/opt/pedali/producer.py
+      - ./stations.json:/opt/pedali/stations.json
+
+  spark-worker-1:
+    image: bitnamilegacy/spark:3.5
+    container_name: pedali-spark-worker-1
+    user: root
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+    ports:
+      - "8081:8081"
+    volumes: *pedali-volumes
+
+  spark-worker-2:
+    image: bitnamilegacy/spark:3.5
+    container_name: pedali-spark-worker-2
+    user: root
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+    ports:
+      - "8082:8081"
+    volumes: *pedali-volumes
+
+  minio:
+    image: bitnamilegacy/minio:2025.4.22
+    container_name: pedali-minio
+    user: root
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: bitnamilegacy/minio-client:latest
+    depends_on:
+      - minio
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 2; done
+        mc mb --ignore-existing local/lake
+        mc mb --ignore-existing local/lake/bronze
+        mc mb --ignore-existing local/lake/silver
+        mc mb --ignore-existing local/lake/gold
+        mc mb --ignore-existing local/lake/checkpoints
+        mc ls local/lake
+    restart: "no"
+
+  jupyter:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: pedali-jupyter
+    environment:
+      - JUPYTER_TOKEN=pedali
+      - SPARK_MASTER=spark://spark-master:7077
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./src:/home/jovyan/work/src
+      - ./data:/home/jovyan/work/data
+      - ./producer.py:/home/jovyan/work/producer.py
+      - ./stations.json:/home/jovyan/work/stations.json
+
+volumes:
+  kafka_data:
+  minio_data:
